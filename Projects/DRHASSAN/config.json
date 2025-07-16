@@ -1,0 +1,23 @@
+{
+    "common": {
+        "project": "SAMPLE"
+    },
+
+    "paths": {
+        "source_files": "0Source",
+        "parsed_files": "1Parsed",
+        "processed_files": "2Processed",
+    },
+
+    "parse": {
+        "src_ext": "pdf",
+        "dst_ext": "txt",
+        "overwrite": false
+    },
+
+    "process": {
+        "src_ext": "json",
+        "dst_ext": "txt",
+        "overwrite": false
+    }
+}
