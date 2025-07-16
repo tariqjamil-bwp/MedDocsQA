@@ -132,9 +132,104 @@ def save_response_to_json(response: Union[str, Dict], filename: Union[str, Path]
     except PermissionError as e: logger.error(f"Permission error writing to {filename}: {e}"); return 1
 
 def get_instructions(subject: str) -> List[str]:
-    # This function is unchanged and correct.
-    base_instructions = [dedent("""...""")]
-    return base_instructions
+    INSTRUCTIONS = [
+        dedent("""
+        **Persona:** You are a meticulous Medical College Professor specializing in creating and analyzing exam questions.
+        Your task is to deconstruct a given medical question-answer block into its core components.
+        """),
+        
+        dedent("""
+        **Input Analysis:**
+        You will receive a text block containing the following parts, which you must identify and segregate:
+        - `question_num`: {str) The identifier for the question in str form with quotes (e.g., "1","2" etc. ). Only extract digit part of the string after Question # <digit>, and enclose in "".
+        
+        - `question_desc`: (str) The clinical scenario or background information.
+        - `question_line`: (str) The specific question, usually ending with a question mark.
+        - `options`: upto 8 enumerated lines containing multiple-choice answers, starting with numerals, e.g., 'a)', 'b)', etc.
+        - `correct_choice`: (str) A short statement identifying the correct option (e.g., "Correct answer is a.").
+        - `reasoning`: (str) The detailed explanation of the reasonong behind correct choice, and possibly reasons why incorrect choices are not logical. 
+        """),
+        
+        dedent("""**IMPORTANT**: 'DO NOT MODIFY THE ORIGINAL TEXT, OR ADD YOUR OWN COMMENTARY'"""),
+        
+        dedent("""
+        **Output Generation:**
+        The Output should be in Markdown format as per output template. 
+        *INSTRUCTIONS*:
+        Additionally, you will create two modified fields alongside the original fields:
+        1.  `updated_description`: (str) Rewrite the `question_desc` to be more concise. Remove filler words or less critical information while retaining the core clinical details.
+        2.  updated_reasoning': (str) Summarize the `reasoning`. Focus on the primary justification for the correct answer and briefly state why the main distractors are incorrect.
+        3. remove any preceeding characters before 'choice' numerals in options, e.g. '-' or whitespaces.
+        4. Ensure that each of the choice under Option is placed in separate new lines instead of a single line for all options"""),
+        
+        
+        dedent("""
+        **Options Handling:**
+        1. If the 'options' numerals errorneously doesn't start with 1st numeral in series (e.g. 'a', '1', 'i' as the case may be), CORRECT them to start with 1st numeral in the series and follow the sequence. Usually it does not require 'correct_choice' line adjustment.
+        
+        2. Rearrange Options values in Alphabetical Order and reassign numeral in the series starting with 1st numeral in series. 
+        
+        3. While performing the above actions, MAKE SURE that 'correct_choice' line also reflects the change and point to the correct choice numeral.
+        
+        4. Remember the modified (from above 1,2) choice_lines as 'updated_options' (str) for expected_output format.
+        5. Remember the modified (from above 3) 'correct_choice' line as 'updated_correct_choice' (str) for expected_output format.
+        6. Create a new field 'correct_choice_text' (str) by appropriate referencing the correct_choice to the 'updated_options' for expected_output format.
+        
+        
+        OPTIONS EXAMPLE:
+        Options: (original)
+        f) Partial or absence seizures
+        g) Botulinum toxicity
+        h) Guillain-Barre syndrome
+        
+        'Correct Choice' is b.
+        
+        CHAIN OF THOUGHT:
+        step 1. correct the sequence to start with 1st series letter.
+        Options:
+        a) Partial or absence seizures
+        b) Botulinum toxicity
+        c) Guillain-Barre syndrome
+        
+        'Correct Choice' is b. (PRESERVE its value: 'Botulinum toxicity'). 
+        
+        step 2: Rearrange in alphabetical order
+        Options:
+        a) Botulinum toxicity
+        b) Guillain-Barre syndrome
+        c) Partial or absence seizures
+        
+        Step 3: Think of 'correct choice' line. It was pointing to 'Botulinum toxicity'. Now that choice has moved to position 'a)'
+        'updated_correct_choice' is 'a'
+        
+        step 4: Consolidate 
+        Options:
+        a) Botulinum toxicity
+        b) Guillain-Barre syndrome
+        c) Partial or absence seizures
+        
+        'updated_correct_choice' is 'a'
+        'updated_correct_choice_text': "Botulinum toxicity" 
+        
+        """),
+
+        dedent("""
+        **Final Checks:**
+        - Ensure your entire output is in JSON OBJECT FORMAT.
+        - All keys/fields must be present.
+        - The content for each field must be accurately extracted or generated as per these instructions.
+        """),       
+    ]
+    
+    new_instr = []
+    if os.path.exists("xtra_instrcutions.txt"):
+        with open('xtra_instrcutions.txt') as f:
+            new_instr = f.readlines()
+    
+    if new_instr:
+        return INSTRUCTIONS+new_instr
+    
+    return INSTRUCTIONS
 
 def validate_json_keys(file_path: Union[str, Path]) -> int:
     # This function is unchanged and correct.
