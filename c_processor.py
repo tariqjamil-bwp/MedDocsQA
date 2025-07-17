@@ -5,7 +5,7 @@ from pathlib import Path
 import logging
 from typing import Union
 import time
-import threading # Import the threading module
+import sys # Import sys for exiting
 
 from qa_agent import call_qa_agent
 from utils import process_json_response, get_question_numbers_from_json, read_qa_from_json, get_paths
@@ -17,25 +17,7 @@ logger = logging.getLogger(__name__)
 # #############################################################################
 # --- Module-level Configuration ---
 # #############################################################################
-
-# --- This section is modified for background execution ---
-# We will no longer call get_available_gemini_models() here.
-# Instead, we'll do it in a background thread inside main().
-MODELS = [] # Start with an empty list
-
-def get_models_worker(model_list: list):
-    """A simple worker function to run in a background thread."""
-    logger.info("Background thread started to fetch available Gemini models...")
-    try:
-        available_models = get_available_gemini_models()
-        if available_models:
-            model_list.extend(available_models)
-            logger.info(f"Background thread finished. Found models: {model_list}")
-        else:
-            logger.warning("Background model check returned no available models.")
-    except Exception as e:
-        logger.error(f"Error in background model-fetching thread: {e}")
-
+MODELS = [] # Lazy-loaded
 # #############################################################################
 # --- Main Processor Function ---
 # #############################################################################
@@ -61,24 +43,12 @@ def main(paths, subject_file: Union[str, Path], overwrite: bool = True):
     # --- 1. Initialization and Path Setup ---
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     logger.info(f"--- Starting AI Processing for: {subject_file} ---")
-
-    # --- Start of Added Code for Background Model Fetching ---
-    global MODELS
-    model_thread = threading.Thread(target=get_models_worker, args=(MODELS,))
-    model_thread.start() # This starts the check in the background
-    # --- End of Added Code ---
-
     if not subject_file:
         raise ValueError("A 'subject_file' (e.g., 'Cardiology.json') must be provided.")
 
     src_dir = paths.PARSED_DIR
     dst_dir = paths.PROCESSED_DIR
     dst_dir.mkdir(parents=True, exist_ok=True)
-
-    # Define the abort signal file path within a 'tmp' subfolder of the project
-    tmp_dir = paths.UPROJ_DIR / "tmp"
-    tmp_dir.mkdir(exist_ok=True)
-    abort_file = tmp_dir / "abort_flag.txt"
 
     src_file_path = src_dir / subject_file
     subject = src_file_path.stem
@@ -111,84 +81,84 @@ def main(paths, subject_file: Union[str, Path], overwrite: bool = True):
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     # --- 4. Main Processing Loop ---
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    
-    # --- Start of Added Code: Wait for Model List ---
-    logger.info("Waiting for background model check to complete before starting loop...")
-    model_thread.join() # Wait here for the background thread to finish.
-    if not MODELS:
-        logger.error("No available models found. Cannot proceed with AI processing. Check API key and connectivity.")
-        return
-    logger.info("Model check complete. Starting AI processing loop.")
-    # --- End of Added Code ---
-
     last_successful_model_idx = 0
-    for question in qa_list:
-        if abort_file.exists():
-            logger.warning("--- ABORT SIGNAL DETECTED. Stopping AI processing. ---")
-            abort_file.unlink()
-            return
+    try: # --- ADDED: Start of try block for KeyboardInterrupt ---
+        for question in qa_list:
+            qa_no = question.get('question_number')
+            qa_body = question.get('block', "NIL")
 
-        qa_no = question.get('question_number')
-        qa_body = question.get('block', "NIL")
-
-        if qa_no in questions_in_json:
-            logger.info(f"Question {qa_no} already exists in target file. Skipping.")
-            continue
-        
-        logger.info(f"--- Processing Question {qa_no} from file {subject} ---")
-        
-        # --- 4b. Resilient AI Agent Call with Rate Limit Handling ---
-        agent_output_file = Path("tmp") / f"{subject.lower()}_qa{qa_no}.json"
-        resp_code = -1
-        
-        max_retries = 5
-        base_delay_seconds = 10
-
-        for attempt in range(max_retries):
-            model_to_try = MODELS[(last_successful_model_idx + (attempt % len(MODELS))) % len(MODELS)]
+            if qa_no in questions_in_json:
+                logger.info(f"Question {qa_no} already exists in target file. Skipping.")
+                continue
             
-            try:
-                logger.info(f"Attempt {attempt + 1}/{max_retries}: Executing Agent using model: '{model_to_try}'")
-                resp_code = call_qa_agent(
-                    qa_body=qa_body,
-                    subject=subject,
-                    output_file=agent_output_file.name,
-                    model_choice=model_to_try,
-                )
-                if resp_code == 0:
-                    logger.info(f"Agent call successful with '{model_to_try}'.")
-                    last_successful_model_idx = MODELS.index(model_to_try)
-                    break 
-                else:
-                    logger.warning(f"Agent call failed with code {resp_code}. Retrying...")
-            
-            except ModelProviderError as e:
-                if '429' in str(e):
-                    delay = base_delay_seconds * (2 ** attempt)
-                    logger.warning(f"Rate limit exceeded (429). Waiting for {delay} seconds before retrying...")
-                    time.sleep(delay)
-                    continue
-                else:
-                    logger.error(f"A non-rate-limit ModelProviderError occurred: {e}. Trying next model/retry.", exc_info=False)
-            
-            except Exception as e:
-                logger.error(f"An unexpected exception occurred during call_qa_agent: {e}. Retrying.", exc_info=True)
+            # --- Lazy Loading of Models ---
+            global MODELS
+            if not MODELS:
+                logger.info("First agent call. Fetching available Gemini models...")
+                MODELS = get_available_gemini_models()
+                if not MODELS:
+                    logger.error("No available models found. Cannot proceed. Check API key and connectivity.")
+                    return # Stop if no models are found
+                logger.info(f"Models acquired: {MODELS}")
 
-        # --- 4c. Process Agent Response ---
-        if resp_code != 0:
-            logger.error(f"Failed to get a valid response for question {qa_no} after {max_retries} attempts. Skipping.")
-            continue
+            logger.info(f"--- Processing Question {qa_no} from file {subject} ---")
+            
+            # --- 4b. Resilient AI Agent Call with Rate Limit Handling ---
+            agent_output_file = paths.UPROJ_DIR / "tmp" / f"{subject.lower()}_qa{qa_no}.json"
+            resp_code = -1
+            
+            max_retries = 5
+            base_delay_seconds = 10
 
-        ret_code = process_json_response(agent_output_file, final_output_file_path, is_first_question)
-        
-        # --- 4d. Update State on Success ---
-        if ret_code == 0:
-            is_first_question = False
-            questions_in_json.append(str(qa_no))
-        else:
-            logger.error(f"Failed to save processed response for Question {qa_no}. Skipping.")
-        
-        time.sleep(2)
+            for attempt in range(max_retries):
+                model_to_try = MODELS[(last_successful_model_idx + (attempt % len(MODELS))) % len(MODELS)]
+                
+                try:
+                    logger.info(f"Attempt {attempt + 1}/{max_retries}: Executing Agent using model: '{model_to_try}'")
+                    resp_code = call_qa_agent(
+                        qa_body=qa_body,
+                        subject=subject,
+                        output_file=agent_output_file.name,
+                        model_choice=model_to_try,
+                    )
+                    if resp_code == 0:
+                        logger.info(f"Agent call successful with '{model_to_try}'.")
+                        last_successful_model_idx = MODELS.index(model_to_try)
+                        break 
+                    else:
+                        logger.warning(f"Agent call failed with code {resp_code}. Retrying...")
+                
+                except ModelProviderError as e:
+                    if '429' in str(e):
+                        delay = base_delay_seconds * (2 ** attempt)
+                        logger.warning(f"Rate limit exceeded (429). Waiting for {delay} seconds before retrying...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"A non-rate-limit ModelProviderError occurred: {e}. Trying next model/retry.", exc_info=False)
+                
+                except Exception as e:
+                    logger.error(f"An unexpected exception occurred during call_qa_agent: {e}. Retrying.", exc_info=True)
+
+            # --- 4c. Process Agent Response ---
+            if resp_code != 0:
+                logger.error(f"Failed to get a valid response for question {qa_no} after {max_retries} attempts. Skipping.")
+                continue
+
+            ret_code = process_json_response(agent_output_file, final_output_file_path, is_first_question)
+            
+            # --- 4d. Update State on Success ---
+            if ret_code == 0:
+                is_first_question = False
+                questions_in_json.append(str(qa_no))
+            else:
+                logger.error(f"Failed to save processed response for Question {qa_no}. Skipping.")
+            
+            time.sleep(2)
+            
+    except KeyboardInterrupt: # --- ADDED: Catch Ctrl+C ---
+        logger.warning("\n--- KEYBOARD INTERRUPT DETECTED. Stopping AI processing gracefully. ---")
+        sys.exit(0) # Exit the script cleanly
 
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     # --- 5. Finalization ---

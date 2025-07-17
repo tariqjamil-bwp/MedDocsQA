@@ -9,13 +9,6 @@ import os
 import sys
 import subprocess
 
-# --- Configure logging to print to the command window (console) ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout  # Explicitly direct logs to standard output
-)
-
 # --- Import your project's functions ---
 from utils import get_paths, ProjectPaths
 from utils2 import convert_json_to_docx, sort_json_file
@@ -41,11 +34,25 @@ def open_file_in_explorer(path: Path):
     elif sys.platform.startswith('darwin'): subprocess.call(['open', directory])
     else: subprocess.call(['xdg-open', directory])
 
-def display_results(message: str, file_path: Path):
-    st.success(message)
-    st.code(str(file_path.resolve()), language=None)
-    if st.button(f"📂 Open Containing Folder", key=f"open_{file_path.stem}_{file_path.stat().st_mtime}"):
-        open_file_in_explorer(file_path)
+def display_log_entry(container, log_entry, index):
+    """Displays a single, persistent log entry."""
+    msg_type = log_entry.get("type", "info")
+    message = log_entry.get("message", "")
+    file_path = log_entry.get("file_path")
+
+    if msg_type == "success": container.success(message)
+    elif msg_type == "error": container.error(message)
+    else: container.info(message)
+    
+    if file_path:
+        container.code(str(file_path.resolve()), language=None)
+        if container.button(f"📂 Open Containing Folder", key=f"open_{index}_{file_path.stem}"):
+            open_file_in_explorer(file_path)
+    container.divider()
+
+def get_expander_label(step_num, title):
+    if st.session_state.active_step == step_num: return f"➡️ STEP {step_num}: {title}"
+    return f"STEP {step_num}: {title}"
 
 # #############################################################################
 # --- INITIAL SETUP & CONFIGURATION ---
@@ -54,153 +61,160 @@ def display_results(message: str, file_path: Path):
 st.set_page_config(page_title="Medical Book Processing Pipeline", layout="wide")
 st.title("👨‍⚕️ Medical Book Processing Pipeline")
 
-APP_ROOT = Path(__file__).resolve().parent
-PROJECTS_ROOT = APP_ROOT / "Projects"
-PROJECTS_ROOT.mkdir(exist_ok=True)
+if 'logging_configured' not in st.session_state:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
+    st.session_state.logging_configured = True
 
-with st.expander("STEP 0: Select or Create Project", expanded=True):
-    project_folders = [f.name for f in PROJECTS_ROOT.iterdir() if f.is_dir()]
-    
-    st.markdown("##### Create a New Project")
-    new_project_name = st.text_input("New Project Name:", placeholder="e.g., Endocrinology_Study")
-    if st.button("Create Project"):
-        if new_project_name:
-            new_project_path = PROJECTS_ROOT / new_project_name
-            if not new_project_path.exists():
-                (new_project_path / "0Source").mkdir(parents=True, exist_ok=True)
-                st.success(f"Project '{new_project_name}' created successfully!")
-                time.sleep(1); st.rerun()
-            else: st.warning(f"Project '{new_project_name}' already exists.")
-        else: st.warning("Please enter a name for the new project.")
+if 'active_step' not in st.session_state: st.session_state.active_step = 1
+if 'activity_log' not in st.session_state: st.session_state.activity_log = []
 
-    st.markdown("---")
-    st.markdown("##### Select an Existing Project")
-    if not project_folders:
-        st.warning("No projects found. Please create one above."); st.stop()
+def reset_workflow():
+    st.session_state.active_step = 1
+    st.session_state.activity_log = []
 
-    default_index = project_folders.index("DRHASSAN") if "DRHASSAN" in project_folders else 0
-    selected_project = st.selectbox("Choose your project:", project_folders, index=default_index)
-
-try:
-    paths = get_paths(APP_ROOT, selected_project)
-    st.sidebar.success(f"Active Project: **{selected_project}**")
-except FileNotFoundError:
-    st.error(f"Could not load project '{selected_project}'."); st.stop()
+control_column, live_run_column = st.columns([1, 2])
 
 # #############################################################################
-# --- PIPELINE STEPS ---
+# --- COLUMN 1: CONTROL PANEL ---
 # #############################################################################
+with control_column:
+    st.header("Control Panel")
 
-with st.expander("STEP 1: Upload PDF to Source Folder"):
-    st.markdown(f"Upload a PDF file. It will be saved to `{paths.SRCFILE_DIR.relative_to(APP_ROOT)}`.")
-    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", key=f"uploader_{selected_project}")
-    if uploaded_file and st.button("Save Uploaded PDF"):
-        save_path = paths.SRCFILE_DIR / uploaded_file.name
-        with open(save_path, "wb") as f: f.write(uploaded_file.getbuffer())
-        display_results(f"File '{uploaded_file.name}' saved!", save_path)
-        time.sleep(2); st.rerun()
+    APP_ROOT = Path(__file__).resolve().parent
+    PROJECTS_ROOT = APP_ROOT / "Projects"
+    PROJECTS_ROOT.mkdir(exist_ok=True)
 
-with st.expander("STEP 2: Convert PDF to Text File"):
-    st.markdown(f"Select a PDF from `0Source` to convert into a text file in `1Texted`.")
-    pdf_files = list(paths.SRCFILE_DIR.glob("*.pdf"))
-    selected_pdf = st.selectbox("Select a source PDF:", pdf_files, format_func=lambda p: p.name, key=f"pdf_select_{selected_project}")
+    with st.expander(get_expander_label(0, "Select Project"), expanded=True):
+        project_folders = [f.name for f in PROJECTS_ROOT.iterdir() if f.is_dir()]
+        if not project_folders: st.error("No project folders found. Please create one manually."); st.stop()
+        default_index = project_folders.index("DRHASSAN") if "DRHASSAN" in project_folders else 0
+        selected_project = st.selectbox("Select Project:", project_folders, index=default_index, label_visibility="collapsed", on_change=reset_workflow)
 
-    if selected_pdf:
-        default_dest_path = paths.TEXTED_DIR / f"{selected_pdf.stem}.txt"
-        
-        # --- Confirmation Logic ---
-        if default_dest_path.exists():
-            st.warning(f"Output file `{default_dest_path.name}` already exists.")
-            col1, col2, _ = st.columns([1, 2, 3])
-            
-            if col1.button("Overwrite It", key=f"overwrite_btn_{selected_project}"):
-                with st.spinner(f"Overwriting '{default_dest_path.name}'..."):
+    try:
+        paths = get_paths(APP_ROOT, selected_project)
+        st.sidebar.success(f"Active Project: **{selected_project}**")
+    except FileNotFoundError: st.error(f"Could not load project '{selected_project}'."); st.stop()
+
+    with st.expander(get_expander_label(1, "Upload PDF"), expanded=st.session_state.active_step == 1):
+        uploaded_file = st.file_uploader("Choose a PDF", type="pdf", key=f"uploader_{selected_project}")
+        if uploaded_file and st.button("Save Uploaded PDF"):
+            save_path = paths.SRCFILE_DIR / uploaded_file.name
+            with open(save_path, "wb") as f: f.write(uploaded_file.getbuffer())
+            st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 1 Complete!** Saved: '{uploaded_file.name}'", "file_path": save_path})
+            st.session_state.active_step = 2; st.rerun()
+
+    with st.expander(get_expander_label(2, "PDF to Text"), expanded=st.session_state.active_step == 2):
+        pdf_files = list(paths.SRCFILE_DIR.glob("*.pdf"))
+        selected_pdf = st.selectbox("Select PDF:", pdf_files, format_func=lambda p: p.name, key=f"pdf_select_{selected_project}", label_visibility="collapsed")
+        if selected_pdf:
+            dest_path = paths.TEXTED_DIR / f"{selected_pdf.stem}.txt"
+            if dest_path.exists():
+                st.warning(f"`{dest_path.name}` exists."); c1, c2 = st.columns(2)
+                if c1.button("Overwrite", key="overwrite_s2"):
                     a_converter.main(paths=paths, subject_file=selected_pdf.name, overwrite=True)
-                    display_results("File overwritten successfully!", default_dest_path)
-                time.sleep(2); st.rerun()
-
-            if col2.button("Save as New (Recommended)", key=f"save_new_btn_{selected_project}"):
-                final_dest_path = get_next_filename(default_dest_path)
-                with st.spinner(f"Saving new file '{final_dest_path.name}'..."):
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 2 Complete!** Overwritten file:", "file_path": dest_path})
+                    st.session_state.active_step = 3; st.rerun()
+                if c2.button("Save as New", key="save_new_s2"):
+                    new_path = get_next_filename(dest_path); a_converter.main(paths=paths, subject_file=selected_pdf.name, overwrite=True)
+                    if dest_path.exists(): dest_path.rename(new_path)
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 2 Complete!** Saved as new file:", "file_path": new_path})
+                    st.session_state.active_step = 3; st.rerun()
+            else:
+                if st.button("Convert to Text", key="convert_s2"):
                     a_converter.main(paths=paths, subject_file=selected_pdf.name, overwrite=True)
-                    if default_dest_path.exists(): default_dest_path.rename(final_dest_path)
-                    display_results("New file saved successfully!", final_dest_path)
-                time.sleep(2); st.rerun()
-        else:
-            if st.button("Convert to Text"):
-                with st.spinner(f"Converting '{selected_pdf.name}'..."):
-                    a_converter.main(paths=paths, subject_file=selected_pdf.name, overwrite=True)
-                    display_results("Conversion successful!", default_dest_path)
-                time.sleep(2); st.rerun()
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 2 Complete!** Created output:", "file_path": dest_path})
+                    st.session_state.active_step = 3; st.rerun()
 
-with st.expander("STEP 3: Parse Text to Raw Question JSON"):
-    st.markdown("Select a text file from `1Texted` to parse into structured JSON in `2Parsed`.")
-    text_files = list(paths.TEXTED_DIR.glob("*.txt"))
-    selected_text = st.selectbox("Select a source text file:", text_files, format_func=lambda p: p.name, key=f"text_select_{selected_project}")
-    
-    if st.button("Parse Text File"):
+    with st.expander(get_expander_label(3, "Parse to JSON"), expanded=st.session_state.active_step == 3):
+        text_files = list(paths.TEXTED_DIR.glob("*.txt"))
+        selected_text = st.selectbox("Select Text File:", text_files, format_func=lambda p: p.name, key=f"text_select_{selected_project}", label_visibility="collapsed")
         if selected_text:
-            default_dest_path = paths.PARSED_DIR / f"{selected_text.stem}.json"
-            final_dest_path = get_next_filename(default_dest_path) if default_dest_path.exists() else default_dest_path
-            
-            with st.spinner(f"Parsing '{selected_text.name}'..."):
-                b_parser.main(paths=paths, subject_file=selected_text.name, overwrite=True)
-                if default_dest_path != final_dest_path and default_dest_path.exists():
-                    default_dest_path.rename(final_dest_path)
-                with open(final_dest_path, 'r', encoding='utf-8') as f: data = json.load(f)
-                display_results(f"Parsing successful! Found {len(data)} question blocks.", final_dest_path)
-            time.sleep(2); st.rerun()
+            dest_path = paths.PARSED_DIR / f"{selected_text.stem}.json"
+            if dest_path.exists():
+                st.warning(f"`{dest_path.name}` exists."); c1, c2 = st.columns(2)
+                if c1.button("Overwrite", key="overwrite_s3"):
+                    b_parser.main(paths=paths, subject_file=selected_text.name, overwrite=True)
+                    with open(dest_path, 'r', encoding='utf-8') as f: data = json.load(f)
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 3 Complete!** Parsed {len(data)} questions to overwritten file:", "file_path": dest_path})
+                    st.session_state.active_step = 4; st.rerun()
+                if c2.button("Save as New", key="save_new_s3"):
+                    new_path = get_next_filename(dest_path); b_parser.main(paths=paths, subject_file=selected_text.name, overwrite=True)
+                    if dest_path.exists(): dest_path.rename(new_path)
+                    with open(new_path, 'r', encoding='utf-8') as f: data = json.load(f)
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 3 Complete!** Parsed {len(data)} questions to new file:", "file_path": new_path})
+                    st.session_state.active_step = 4; st.rerun()
+            else:
+                if st.button("Parse Text File", key="parse_s3"):
+                    b_parser.main(paths=paths, subject_file=selected_text.name, overwrite=True)
+                    with open(dest_path, 'r', encoding='utf-8') as f: data = json.load(f)
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 3 Complete!** Parsed {len(data)} questions:", "file_path": dest_path})
+                    st.session_state.active_step = 4; st.rerun()
 
-with st.expander("STEP 4: Process JSON with Gemini AI"):
-    st.markdown("Select a parsed JSON from `2Parsed` to process with the AI Agent.")
-    parsed_files = list(paths.PARSED_DIR.glob("*.json"))
-    selected_parsed_json = st.selectbox("Select a parsed JSON file:", parsed_files, format_func=lambda p: p.name, key=f"parsed_select_{selected_project}")
+    with st.expander(get_expander_label(4, "Process with AI & Sort"), expanded=st.session_state.active_step == 4):
+        parsed_files = list(paths.PARSED_DIR.glob("*.json"))
+        selected_parsed = st.selectbox("Select Parsed JSON:", parsed_files, format_func=lambda p: p.name, key=f"parsed_select_{selected_project}", label_visibility="collapsed")
+        if selected_parsed:
+            final_file = paths.PROCESSED_DIR / f"{selected_parsed.stem}_processed.json"
+            def run_processor_and_sorter(overwrite: bool):
+                with live_run_column:
+                    st.empty()
+                    with st.spinner(f"Processing '{selected_parsed.name}'... Press Ctrl+C in the console to abort."):
+                        c_processor.main(paths=paths, subject_file=selected_parsed.name, overwrite=overwrite)
+                    
+                    st.success("✅ AI Processing Finished.")
+                    display_results(st, "Latest processed file:", final_file)
+                    st.divider()
 
-    if selected_parsed_json:
-        final_file = paths.PROCESSED_DIR / f"{selected_parsed_json.stem}_processed.json"
-        
-        def run_processor(overwrite_flag: bool):
-            with st.spinner(f"Processing with AI (Overwrite={overwrite_flag})... This may take a long time..."):
-                logging.info(f"Starting AI Processor for '{selected_parsed_json.name}' with overwrite set to {overwrite_flag}.")
-                c_processor.main(paths=paths, subject_file=selected_parsed_json.name, overwrite=overwrite_flag)
-                display_results("AI processing completed!", final_file)
-            time.sleep(2); st.rerun()
+                    with st.spinner("Automatically sorting file..."):
+                        sorted_dest_path = final_file.with_name(f"{final_file.stem}_sorted.json")
+                        sort_json_file(input_path=final_file, output_path=sorted_dest_path, sort_key="updated_correct_choice_text")
+                    st.success("✅ Automatic Sorting Complete!")
+                    display_results(st, "Created sorted file:", sorted_dest_path)
+                    st.divider()
+                st.session_state.active_step = 5
+                st.rerun()
 
-        if final_file.exists():
-            st.warning(f"Processed file `{final_file.name}` already exists.")
-            col1, col2, _ = st.columns([2, 2, 2])
-            if col1.button("Resume Incomplete Job", key=f"resume_btn_{selected_project}"):
-                run_processor(overwrite_flag=False)
-            if col2.button("Re-Process from Scratch", key=f"reprocess_btn_{selected_project}"):
-                run_processor(overwrite_flag=True)
-        else:
-            if st.button("Process with AI"):
-                run_processor(overwrite_flag=True) # First run is always a full run
+            if final_file.exists():
+                st.warning(f"`{final_file.name}` exists."); c1, c2 = st.columns(2)
+                # --- THIS IS THE RESTORED CODE ---
+                if c1.button("Resume Job", key="resume_s4"):
+                    run_processor_and_sorter(False)
+                if c2.button("Re-Process All", key="reprocess_s4"):
+                    run_processor_and_sorter(True)
+            else:
+                if st.button("Process & Sort", key="process_s4"):
+                    run_processor_and_sorter(True)
 
-with st.expander("STEP 5: Sort Processed JSON File"):
-    st.markdown("Sort a `_processed.json` file from `3Processed`.")
-    processed_files_to_sort = list(paths.PROCESSED_DIR.glob("*_processed.json"))
-    selected_to_sort = st.selectbox("Select a processed JSON to sort:", processed_files_to_sort, format_func=lambda p: p.name, key=f"sort_select_{selected_project}")
-    
-    if st.button("Sort File"):
-        if selected_to_sort:
-            output_path = selected_to_sort.with_name(f"{selected_to_sort.stem}_sorted.json")
-            final_path = get_next_filename(output_path) if output_path.exists() else output_path
-            with st.spinner(f"Sorting '{selected_to_sort.name}'..."):
-                sort_json_file(input_path=selected_to_sort, output_path=final_path, sort_key="updated_correct_choice_text")
-                display_results("File sorted successfully!", final_path)
-            time.sleep(2); st.rerun()
+    with st.expander(get_expander_label(5, "Create Word Document"), expanded=st.session_state.active_step == 5):
+        json_files = sorted(list(paths.PROCESSED_DIR.glob("*.json")), key=lambda p: p.stat().st_mtime, reverse=True)
+        selected_json = st.selectbox("Select JSON for DOCX:", json_files, format_func=lambda p: p.name, key=f"docx_select_{selected_project}", label_visibility="collapsed")
+        if selected_json:
+            dest_path = paths.OUTPUT_DIR / f"{selected_json.stem}.docx"
+            if dest_path.exists():
+                st.warning(f"`{dest_path.name}` exists."); c1, c2 = st.columns(2)
+                if c1.button("Overwrite", key="overwrite_s5"):
+                    convert_json_to_docx(selected_json, dest_path)
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 5 Complete!** Overwritten DOCX file:", "file_path": dest_path})
+                    st.rerun()
+                if c2.button("Save as New", key="save_new_s5"):
+                    new_path = get_next_filename(dest_path)
+                    convert_json_to_docx(selected_json, new_path)
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 5 Complete!** Saved as new DOCX file:", "file_path": new_path})
+                    st.rerun()
+            else:
+                if st.button("Create DOCX", key="create_docx_s5"):
+                    convert_json_to_docx(selected_json, dest_path)
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 5 Complete!** Created DOCX file:", "file_path": dest_path})
+                    st.rerun()
 
-with st.expander("STEP 6: Create Word (DOCX) Document"):
-    st.markdown("Select any JSON file from `3Processed` to generate a DOCX file in `OUTPUT`.")
-    json_for_docx = list(paths.PROCESSED_DIR.glob("*.json"))
-    selected_json_for_docx = st.selectbox("Select JSON for DOCX creation:", json_for_docx, format_func=lambda p: p.name, key=f"docx_select_{selected_project}")
-    
-    if st.button("Create Word Document"):
-        if selected_json_for_docx:
-            docx_path = paths.OUTPUT_DIR / f"{selected_json_for_docx.stem}.docx"
-            final_path = get_next_filename(docx_path) if docx_path.exists() else docx_path
-            with st.spinner(f"Generating DOCX for '{selected_json_for_docx.name}'..."):
-                convert_json_to_docx(selected_json_for_docx, final_path)
-                display_results("DOCX file created successfully!", final_path)
-            time.sleep(2); st.rerun()
+# #############################################################################
+# --- COLUMN 2: ACTIVITY LOG ---
+# #############################################################################
+with live_run_column:
+    st.header("Activity Log")
+    log_container = st.container(height=800, border=True)
+    if not st.session_state.activity_log:
+        log_container.info("Results from your actions will appear here.")
+    else:
+        for i, entry in enumerate(st.session_state.activity_log):
+            display_log_entry(log_container, entry, i)
