@@ -141,8 +141,7 @@ def get_instructions(subject: str) -> List[str]:
         dedent("""
         **Input Analysis:**
         You will receive a text block containing the following parts, which you must identify and segregate:
-        - `question_num`: {str) The identifier for the question in str form with quotes (e.g., "1","2" etc. ). Only extract digit part of the string after Question # <digit>, and enclose in "".
-        
+        - `question_num`: {str) The identifier for the question in str form with quotes (e.g., "1","2" etc. ). Only extract digit part of the string after Question # <digit>.
         - `question_desc`: (str) The clinical scenario or background information.
         - `question_line`: (str) The specific question, usually ending with a question mark.
         - `options`: upto 8 enumerated lines containing multiple-choice answers, starting with numerals, e.g., 'a)', 'b)', etc.
@@ -159,9 +158,7 @@ def get_instructions(subject: str) -> List[str]:
         Additionally, you will create two modified fields alongside the original fields:
         1.  `updated_description`: (str) Rewrite the `question_desc` to be more concise. Remove filler words or less critical information while retaining the core clinical details.
         2.  updated_reasoning': (str) Summarize the `reasoning`. Focus on the primary justification for the correct answer and briefly state why the main distractors are incorrect.
-        3. remove any preceeding characters before 'choice' numerals in options, e.g. '-' or whitespaces.
-        4. Ensure that each of the choice under Option is placed in separate new lines instead of a single line for all options"""),
-        
+        3. remove any preceeding characters before 'choice' numerals in options, e.g. '-' or whitespaces."""),
         
         dedent("""
         **Options Handling:**
@@ -174,7 +171,7 @@ def get_instructions(subject: str) -> List[str]:
         4. Remember the modified (from above 1,2) choice_lines as 'updated_options' (str) for expected_output format.
         5. Remember the modified (from above 3) 'correct_choice' line as 'updated_correct_choice' (str) for expected_output format.
         6. Create a new field 'correct_choice_text' (str) by appropriate referencing the correct_choice to the 'updated_options' for expected_output format.
-        
+        4. Ensure that each of the choice under Option is placed at a separate new line.
         
         OPTIONS EXAMPLE:
         Options: (original)

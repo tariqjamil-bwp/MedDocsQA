@@ -47,10 +47,7 @@ OUTPUT_TEMPLATE = """
 {{updated_options}}
 
 **!CORRECT CHOICE (Letter):**
-{{updated_correct_choice}}
-
-**!CORRECT CHOICE (Text):**
-{{updated_correct_choice_text}}
+{{updated_correct_choice}}   ({{updated_correct_choice_text}}}
 
 **!REFINED REASONING:**
 {{updated_reasoning}}

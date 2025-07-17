@@ -282,15 +282,25 @@ def process_json_response(resp_data_file: Path, output_file_path: Path, is_first
     # non-integer question numbers (e.g., '15a') gracefully.
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     def sort_key(item):
-        """A smart sort key that handles numbers and letters in question_num."""
+        """
+        A smart sort key that handles numbers and letters in 'question_num'.
+        It explicitly converts the numeric part to an integer for correct sorting.
+        """
         num_str = item.get("question_num", "0")
-        # Use regex to separate numeric and alphabetic parts
-        match = re.match(r'(\d+)([a-zA-Z]*)', str(num_str)) # Ensure num_str is a string
+        
+        # Use regex to find the leading numeric part of the string.
+        match = re.match(r'(\d+)', str(num_str))
+        
         if match:
+            # Convert the found digits to an integer.
             num_part = int(match.group(1))
-            str_part = match.group(2)
+            # The rest of the string after the number is used for secondary sorting (e.g., 'a' in '15a').
+            str_part = str(num_str)[len(match.group(1)):]
             return (num_part, str_part)
-        return (float('inf'), num_str) # Place malformed numbers at the end
+        
+        # If no number is found, treat it as a low-priority string sort.
+        # Placing malformed/non-numeric question numbers at the end.
+        return (float('inf'), str(num_str))
 
     try:
         existing_data.sort(key=sort_key)

@@ -5,6 +5,7 @@ from pathlib import Path
 import logging
 from typing import Union
 import time
+import threading # Import the threading module
 
 from qa_agent import call_qa_agent
 from utils import process_json_response, get_question_numbers_from_json, read_qa_from_json, get_paths
@@ -16,9 +17,25 @@ logger = logging.getLogger(__name__)
 # #############################################################################
 # --- Module-level Configuration ---
 # #############################################################################
-# *** UPDATED MODEL LIST ***
-MODELS = get_available_gemini_models()
-print(MODELS)
+
+# --- This section is modified for background execution ---
+# We will no longer call get_available_gemini_models() here.
+# Instead, we'll do it in a background thread inside main().
+MODELS = [] # Start with an empty list
+
+def get_models_worker(model_list: list):
+    """A simple worker function to run in a background thread."""
+    logger.info("Background thread started to fetch available Gemini models...")
+    try:
+        available_models = get_available_gemini_models()
+        if available_models:
+            model_list.extend(available_models)
+            logger.info(f"Background thread finished. Found models: {model_list}")
+        else:
+            logger.warning("Background model check returned no available models.")
+    except Exception as e:
+        logger.error(f"Error in background model-fetching thread: {e}")
+
 # #############################################################################
 # --- Main Processor Function ---
 # #############################################################################
@@ -44,12 +61,24 @@ def main(paths, subject_file: Union[str, Path], overwrite: bool = True):
     # --- 1. Initialization and Path Setup ---
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     logger.info(f"--- Starting AI Processing for: {subject_file} ---")
+
+    # --- Start of Added Code for Background Model Fetching ---
+    global MODELS
+    model_thread = threading.Thread(target=get_models_worker, args=(MODELS,))
+    model_thread.start() # This starts the check in the background
+    # --- End of Added Code ---
+
     if not subject_file:
         raise ValueError("A 'subject_file' (e.g., 'Cardiology.json') must be provided.")
 
     src_dir = paths.PARSED_DIR
     dst_dir = paths.PROCESSED_DIR
     dst_dir.mkdir(parents=True, exist_ok=True)
+
+    # Define the abort signal file path within a 'tmp' subfolder of the project
+    tmp_dir = paths.UPROJ_DIR / "tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    abort_file = tmp_dir / "abort_flag.txt"
 
     src_file_path = src_dir / subject_file
     subject = src_file_path.stem
@@ -82,8 +111,23 @@ def main(paths, subject_file: Union[str, Path], overwrite: bool = True):
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     # --- 4. Main Processing Loop ---
     # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
+    
+    # --- Start of Added Code: Wait for Model List ---
+    logger.info("Waiting for background model check to complete before starting loop...")
+    model_thread.join() # Wait here for the background thread to finish.
+    if not MODELS:
+        logger.error("No available models found. Cannot proceed with AI processing. Check API key and connectivity.")
+        return
+    logger.info("Model check complete. Starting AI processing loop.")
+    # --- End of Added Code ---
+
     last_successful_model_idx = 0
     for question in qa_list:
+        if abort_file.exists():
+            logger.warning("--- ABORT SIGNAL DETECTED. Stopping AI processing. ---")
+            abort_file.unlink()
+            return
+
         qa_no = question.get('question_number')
         qa_body = question.get('block', "NIL")
 
