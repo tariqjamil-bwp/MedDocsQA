@@ -11,8 +11,7 @@ import subprocess
 
 # --- Import your project's functions ---
 from utils import get_paths, ProjectPaths
-# Ensure this import points to your file containing the clustering function
-from utils2 import convert_json_to_docx, cluster_json_by_semantic_similarity
+from utils2 import convert_json_to_docx, sort_json_file
 import a_converter
 import b_parser
 import c_processor
@@ -22,6 +21,7 @@ import c_processor
 # #############################################################################
 
 def get_next_filename(path: Path) -> Path:
+    """Finds the next available filename to avoid overwriting (e.g., file_1.txt, file_2.txt)."""
     if not path.exists(): return path
     i = 1
     while True:
@@ -30,27 +30,33 @@ def get_next_filename(path: Path) -> Path:
         i += 1
 
 def open_file_in_explorer(path: Path):
+    """Opens the file explorer to the directory containing the given path."""
     directory = path.resolve().parent
-    if sys.platform.startswith('win'):
-        os.startfile(directory)
-    elif sys.platform.startswith('darwin'):
-        subprocess.call(['open', str(directory)])
-    else:
-        subprocess.call(['xdg-open', str(directory)])
+    if sys.platform.startswith('win'): os.startfile(directory)
+    elif sys.platform.startswith('darwin'): subprocess.call(['open', directory])
+    else: subprocess.call(['xdg-open', directory])
 
+# -----------------------------------------------------------------------------
+# --- THIS IS THE MISSING FUNCTION ---
 def display_results(container, title: str, file_path: Path):
+    """A helper to display file creation results consistently within a container."""
     container.markdown(f"**{title}**")
     container.code(str(file_path.resolve()), language=None)
+    # Use the file's stem for a unique key to prevent Streamlit widget errors
     if container.button(f"📂 Open Containing Folder", key=f"open_res_{file_path.stem}"):
         open_file_in_explorer(file_path)
+# -----------------------------------------------------------------------------
 
 def display_log_entry(container, log_entry, index):
+    """Displays a single, persistent log entry."""
     msg_type = log_entry.get("type", "info")
     message = log_entry.get("message", "")
     file_path = log_entry.get("file_path")
+
     if msg_type == "success": container.success(message)
     elif msg_type == "error": container.error(message)
     else: container.info(message)
+    
     if file_path:
         container.code(str(file_path.resolve()), language=None)
         if container.button(f"📂 Open Containing Folder", key=f"open_log_{index}_{file_path.stem}"):
@@ -58,8 +64,8 @@ def display_log_entry(container, log_entry, index):
     container.divider()
 
 def get_expander_label(step_num, title):
-    if st.session_state.active_step == step_num:
-        return f"➡️ STEP {step_num}: {title}"
+    """Generates a label for an expander to show the active step."""
+    if st.session_state.active_step == step_num: return f"➡️ STEP {step_num}: {title}"
     return f"STEP {step_num}: {title}"
 
 # #############################################################################
@@ -69,17 +75,21 @@ def get_expander_label(step_num, title):
 st.set_page_config(page_title="Medical Book Processing Pipeline", layout="wide")
 st.title("👨‍⚕️ Dr. M. Hassan's Medical Book Processing Pipeline")
 
+# Configure logging only once
 if 'logging_configured' not in st.session_state:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
     st.session_state.logging_configured = True
 
+# Initialize session state variables
 if 'active_step' not in st.session_state: st.session_state.active_step = 1
 if 'activity_log' not in st.session_state: st.session_state.activity_log = []
 
 def reset_workflow():
+    """Resets the UI to the beginning of the workflow."""
     st.session_state.active_step = 1
     st.session_state.activity_log = []
 
+# Define the main layout columns
 control_column, live_run_column = st.columns([1, 2])
 
 # #############################################################################
@@ -158,12 +168,12 @@ with control_column:
                     st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 3 Complete!** Parsed {len(data)} questions:", "file_path": dest_path})
                     st.session_state.active_step = 4; st.rerun()
 
-    with st.expander(get_expander_label(4, "Process with AI"), expanded=st.session_state.active_step == 4):
+    with st.expander(get_expander_label(4, "Process with AI & Sort"), expanded=st.session_state.active_step == 4):
         parsed_files = list(paths.PARSED_DIR.glob("*.json"))
         selected_parsed = st.selectbox("Select Parsed JSON:", parsed_files, format_func=lambda p: p.name, key=f"parsed_select_{selected_project}", label_visibility="collapsed")
         if selected_parsed:
             final_file = paths.PROCESSED_DIR / f"{selected_parsed.stem}_processed.json"
-            def run_processor_with_AI(overwrite: bool):
+            def run_processor_and_sorter(overwrite: bool):
                 with live_run_column:
                     # Clear the column and show a spinner for the main process
                     st.empty()
@@ -174,81 +184,46 @@ with control_column:
                     display_results(st, "Latest processed file:", final_file)
                     st.divider()
 
+                    # Show a spinner for the sorting process
+                    with st.spinner("Automatically sorting file..."):
+                        sorted_dest_path = final_file.with_name(f"{final_file.stem}_sorted.json")
+                        sort_json_file(input_path=final_file, output_path=sorted_dest_path, sort_key="updated_correct_choice_text")
+                    st.success("✅ Automatic Sorting Complete!")
+                    display_results(st, "Created sorted file:", sorted_dest_path)
+                    st.divider()
                 st.session_state.active_step = 5
                 st.rerun()
 
             if final_file.exists():
                 st.warning(f"`{final_file.name}` exists."); c1, c2 = st.columns(2)
                 if c1.button("Resume Job", key="resume_s4"):
-                    run_processor_with_AI(False)
+                    run_processor_and_sorter(False)
                 if c2.button("Re-Process All", key="reprocess_s4"):
-                    run_processor_with_AI(True)
+                    run_processor_and_sorter(True)
             else:
                 if st.button("Process & Sort", key="process_s4"):
-                    run_processor_with_AI(True)
+                    run_processor_and_sorter(True)
 
-    with st.expander(get_expander_label(5, "Find Semantic Clusters"), expanded=st.session_state.active_step == 5):
-        st.info("Group questions by topic similarity without needing a query.")
-        
-        processed_files = sorted(list(paths.PROCESSED_DIR.glob("*_processed.json")), key=lambda p: p.stat().st_mtime, reverse=True)
-        selected_processed_json = st.selectbox("Select Processed JSON to Cluster:", processed_files, format_func=lambda p: p.name, key=f"cluster_select_{selected_project}")
-        
-        if selected_processed_json:
-            search_key = st.selectbox(
-                "Select text field to analyze:",
-                ("updated_correct_choice_text", "updated_description", "updated_reasoning"),
-                index=0,
-                key=f"cluster_key_{selected_project}",
-                help="Select the field to compare for similarity. 'updated_correct_choice_text' is great for grouping questions by their final answer."
-            )
-            similarity_threshold = st.slider(
-                "Similarity Threshold:",
-                min_value=0.50, max_value=1.0, value=0.80, step=0.05,
-                help="Higher values mean items must be more similar to be grouped. 0.8 is a good starting point."
-            )
-
-            if st.button("Find Clusters", key="cluster_s5"):
-                output_path = paths.PROCESSED_DIR / f"{selected_processed_json.stem}_clustered.json"
-                with st.spinner(f"Clustering '{selected_processed_json.name}'..."):
-                    cluster_json_by_semantic_similarity(
-                        input_path=selected_processed_json,
-                        output_path=output_path,
-                        search_key=search_key,
-                        threshold=similarity_threshold,
-                        min_cluster_size=2
-                    )
-                
-                st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 5 Complete!** Clustering results saved.", "file_path": output_path})
-                st.session_state.active_step = 6
-                st.rerun()
-
-    # --- MODIFIED: The final step is now fully compatible with clustered files ---
-    with st.expander(get_expander_label(6, "Create Word Document"), expanded=st.session_state.active_step == 6):
-        # The selector now correctly includes the new flat clustered files
+    with st.expander(get_expander_label(5, "Create Word Document"), expanded=st.session_state.active_step == 5):
         json_files = sorted(list(paths.PROCESSED_DIR.glob("*.json")), key=lambda p: p.stat().st_mtime, reverse=True)
         selected_json = st.selectbox("Select JSON for DOCX:", json_files, format_func=lambda p: p.name, key=f"docx_select_{selected_project}", label_visibility="collapsed")
-        
         if selected_json:
-            # --- REMOVED THE WARNING ---
-            # The new flat list format from the clustering function is now
-            # fully compatible with the DOCX conversion function.
-
             dest_path = paths.OUTPUT_DIR / f"{selected_json.stem}.docx"
             if dest_path.exists():
                 st.warning(f"`{dest_path.name}` exists."); c1, c2 = st.columns(2)
-                if c1.button("Overwrite", key="overwrite_s6"):
+                if c1.button("Overwrite", key="overwrite_s5"):
                     convert_json_to_docx(selected_json, dest_path)
-                    st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 6 Complete!** Overwritten DOCX file:", "file_path": dest_path})
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 5 Complete!** Overwritten DOCX file:", "file_path": dest_path})
                     st.rerun()
-                if c2.button("Save as New", key="save_new_s6"):
+                if c2.button("Save as New", key="save_new_s5"):
                     new_path = get_next_filename(dest_path)
                     convert_json_to_docx(selected_json, new_path)
-                    st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 6 Complete!** Saved new DOCX file:", "file_path": new_path})
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 5 Complete!** Saved as new DOCX file:", "file_path": new_path})
                     st.rerun()
             else:
-                if st.button("Create DOCX", key="create_docx_s6"):
+                if st.button("Create DOCX", key="create_docx_s5"):
                     convert_json_to_docx(selected_json, dest_path)
-                    st.session_state.activity_log.insert(0, {"type": "success", "message": f"**Step 6 Complete!** Created DOCX file:", "file_path": dest_path})
+                    st.session_state.activity_log.insert(0, {"type": "success", "message": "**Step 5 Complete!** Created DOCX file:", "file_path": dest_path})
                     st.rerun()
 
 # #############################################################################
@@ -262,5 +237,3 @@ with live_run_column:
     else:
         for i, entry in enumerate(st.session_state.activity_log):
             display_log_entry(log_container, entry, i)
-
-# --- END OF FILE app.py ---
