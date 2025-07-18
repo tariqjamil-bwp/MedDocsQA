@@ -21,6 +21,7 @@ import c_processor
 # #############################################################################
 
 def get_next_filename(path: Path) -> Path:
+    """Finds the next available filename to avoid overwriting (e.g., file_1.txt, file_2.txt)."""
     if not path.exists(): return path
     i = 1
     while True:
@@ -29,10 +30,22 @@ def get_next_filename(path: Path) -> Path:
         i += 1
 
 def open_file_in_explorer(path: Path):
+    """Opens the file explorer to the directory containing the given path."""
     directory = path.resolve().parent
     if sys.platform.startswith('win'): os.startfile(directory)
     elif sys.platform.startswith('darwin'): subprocess.call(['open', directory])
     else: subprocess.call(['xdg-open', directory])
+
+# -----------------------------------------------------------------------------
+# --- THIS IS THE MISSING FUNCTION ---
+def display_results(container, title: str, file_path: Path):
+    """A helper to display file creation results consistently within a container."""
+    container.markdown(f"**{title}**")
+    container.code(str(file_path.resolve()), language=None)
+    # Use the file's stem for a unique key to prevent Streamlit widget errors
+    if container.button(f"📂 Open Containing Folder", key=f"open_res_{file_path.stem}"):
+        open_file_in_explorer(file_path)
+# -----------------------------------------------------------------------------
 
 def display_log_entry(container, log_entry, index):
     """Displays a single, persistent log entry."""
@@ -46,11 +59,12 @@ def display_log_entry(container, log_entry, index):
     
     if file_path:
         container.code(str(file_path.resolve()), language=None)
-        if container.button(f"📂 Open Containing Folder", key=f"open_{index}_{file_path.stem}"):
+        if container.button(f"📂 Open Containing Folder", key=f"open_log_{index}_{file_path.stem}"):
             open_file_in_explorer(file_path)
     container.divider()
 
 def get_expander_label(step_num, title):
+    """Generates a label for an expander to show the active step."""
     if st.session_state.active_step == step_num: return f"➡️ STEP {step_num}: {title}"
     return f"STEP {step_num}: {title}"
 
@@ -59,19 +73,23 @@ def get_expander_label(step_num, title):
 # #############################################################################
 
 st.set_page_config(page_title="Medical Book Processing Pipeline", layout="wide")
-st.title("👨‍⚕️ Medical Book Processing Pipeline")
+st.title("👨‍⚕️ Dr. M. Hassan's Medical Book Processing Pipeline")
 
+# Configure logging only once
 if 'logging_configured' not in st.session_state:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
     st.session_state.logging_configured = True
 
+# Initialize session state variables
 if 'active_step' not in st.session_state: st.session_state.active_step = 1
 if 'activity_log' not in st.session_state: st.session_state.activity_log = []
 
 def reset_workflow():
+    """Resets the UI to the beginning of the workflow."""
     st.session_state.active_step = 1
     st.session_state.activity_log = []
 
+# Define the main layout columns
 control_column, live_run_column = st.columns([1, 2])
 
 # #############################################################################
@@ -157,6 +175,7 @@ with control_column:
             final_file = paths.PROCESSED_DIR / f"{selected_parsed.stem}_processed.json"
             def run_processor_and_sorter(overwrite: bool):
                 with live_run_column:
+                    # Clear the column and show a spinner for the main process
                     st.empty()
                     with st.spinner(f"Processing '{selected_parsed.name}'... Press Ctrl+C in the console to abort."):
                         c_processor.main(paths=paths, subject_file=selected_parsed.name, overwrite=overwrite)
@@ -165,6 +184,7 @@ with control_column:
                     display_results(st, "Latest processed file:", final_file)
                     st.divider()
 
+                    # Show a spinner for the sorting process
                     with st.spinner("Automatically sorting file..."):
                         sorted_dest_path = final_file.with_name(f"{final_file.stem}_sorted.json")
                         sort_json_file(input_path=final_file, output_path=sorted_dest_path, sort_key="updated_correct_choice_text")
@@ -176,7 +196,6 @@ with control_column:
 
             if final_file.exists():
                 st.warning(f"`{final_file.name}` exists."); c1, c2 = st.columns(2)
-                # --- THIS IS THE RESTORED CODE ---
                 if c1.button("Resume Job", key="resume_s4"):
                     run_processor_and_sorter(False)
                 if c2.button("Re-Process All", key="reprocess_s4"):
@@ -208,7 +227,7 @@ with control_column:
                     st.rerun()
 
 # #############################################################################
-# --- COLUMN 2: ACTIVITY LOG ---
+# --- COLUMN 2: ACTIVITY LOG & DYNAMIC OUTPUT ---
 # #############################################################################
 with live_run_column:
     st.header("Activity Log")

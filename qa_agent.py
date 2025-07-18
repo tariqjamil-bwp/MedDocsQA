@@ -47,89 +47,109 @@ AGENT_OUTPUT_JSON_TEMPLATE = \
 """
 
 # #############################################################################
-# --- 2. Core Agent and Helper Functions (Unchanged) ---
+# --- 2. Core Agent and Helper Functions ---
 # #############################################################################
 
-def call_qa_agent(qa_body: str, subject: str, output_file: str, model_choice: str) -> int:
+def call_qa_agent(
+    qa_body: str,
+    subject: str,
+    model_choice: str,
+    output_file: Path  # This is the final destination for the clean JSON
+) -> int:
     """
-    Initializes and runs an agent to process a QA block, saves the raw response,
-    and then validates the structured data. This function correctly uses the
-    `agno` library as intended for the main pipeline.
+    Initializes and runs an agent to process a QA block.
+    It internally creates a temporary file for the raw agent response and cleans up afterward.
+    The final, clean JSON is saved to the 'output_file' path provided by the caller.
     """
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 2a. Model and Agent Initialization ---
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
+    # --- Model Initialization ---
     try:
         model = Gemini(id=model_choice, api_key=gemini_api_key) if gemini_api_key else None
+        if not model:
+            logger.error("Failed to initialize Gemini model. API key might be missing or invalid.")
+            return 10
     except Exception as e:
-        logger.error(f"MODEL ERROR...{e}")
+        logger.error(f"MODEL ERROR: Could not instantiate Gemini model. Details: {e}")
         return 10
-    if not(model): return 10
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 2b. Prepare Temporary File Paths ---
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    tmp_dir = Path("tmp")
-    tmp_dir.mkdir(exist_ok=True)
-    raw_response_path = tmp_dir / f"{Path(output_file).stem}_temp.txt"
-    
-    # Clean up old temp files
-    for txt_file in tmp_dir.glob("*.txt"):
-        try: txt_file.unlink()
-        except Exception as e: logger.warning(f"Failed to delete old temp file {txt_file}: {e}")
-    
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 2c. Configure and Instantiate the Agent ---
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
+
+    # --- Internal temporary file management ---
+    # The raw text file is an implementation detail of this function.
+    raw_response_path = output_file.with_name(f"{output_file.stem}_temp_raw.txt")
+
+    # Clean up old temp file if it exists from a previous failed run
+    if raw_response_path.exists():
+        try:
+            raw_response_path.unlink()
+        except Exception as e:
+            logger.warning(f"Could not delete old temp file {raw_response_path.name}: {e}")
+
+    # --- Configure and Instantiate the Agent ---
     qa_agent = Agent(
         model=model,
         description="A Medical College Professor...",
         instructions=get_instructions(subject),
         markdown=True, use_json_mode=True, structured_outputs=True,
         expected_output=AGENT_OUTPUT_JSON_TEMPLATE,
-        save_response_to_file=str(raw_response_path),
+        save_response_to_file=str(raw_response_path), # Agent saves to our internal temp file
     )
 
     user_prompt = f"""Follow instructions to extract data from the text.\n### Text:\n{qa_body}\n\nOUTPUT JSON RESPONSE:\n"""
-    
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 2d. Execute Agent and Process Response ---
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    logger.info(f"--- Calling Agent for: {output_file} ---")
+
+    # --- Execute Agent and Process Response ---
+    logger.info(f"--- Calling Agent for question in: {subject} ---")
     qa_agent.print_response(user_prompt)
-    
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 2e. Read, Save, and Validate the Final JSON ---
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
+
+    # --- Read, Save, and Validate the Final JSON ---
     if not raw_response_path.exists():
-        logger.error(f"Agent failed to create response file: {raw_response_path}"); return 11
+        logger.error(f"Agent failed to create its raw response file: {raw_response_path}")
+        return 11
+
     with open(raw_response_path, "r", encoding='utf-8') as f:
         raw_response_text = f.read()
 
-    agent_json_output_path = tmp_dir / output_file
-    save_code = save_response_to_json(raw_response_text, agent_json_output_path)
-    if save_code != 0: return save_code
-    
-    validation_code = validate_json_keys(agent_json_output_path)
+    # Save the cleaned response to the final destination path provided by the caller
+    save_code = save_response_to_json(raw_response_text, output_file)
+
+    # --- Automatic Cleanup ---
+    # Clean up the internal temporary file now that we're done with it.
+    if raw_response_path.exists():
+        raw_response_path.unlink()
+
+    if save_code != 0:
+        return save_code
+
+    # Validate the final, clean JSON file
+    validation_code = validate_json_keys(output_file)
     if validation_code != 0:
-        logger.error("Validation of Keys Failed"); return validation_code
-    
+        logger.error("Validation of agent's output JSON keys failed.")
+        return validation_code
+
     return 0
 
-# #############################################################################
-# (Helper functions save_response_to_json, get_instructions, validate_json_keys are unchanged)
 def save_response_to_json(response: Union[str, Dict], filename: Union[str, Path]) -> int:
+    """Saves a raw text response to a clean JSON file."""
     filename = Path(filename)
     if isinstance(response, str):
+        # Strip Markdown code fences for JSON
         response = re.sub(r'^```json\s*|\s*```$', '', response.strip(), flags=re.MULTILINE)
-        if not response: logger.error("Agent response is empty after stripping."); return 2
-        try: response_dict = json.loads(response)
-        except json.JSONDecodeError as e: logger.error(f"Invalid JSON: {e}\nContent: {response[:500]}"); return 3
-    else: response_dict = response
-    if not isinstance(response_dict, dict): logger.error("Response is not a dictionary."); return 4
+        if not response:
+            logger.error("Agent response is empty after stripping markdown fences."); return 2
+        try:
+            response_dict = json.loads(response)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON received from agent: {e}\nContent snippet: {response[:500]}"); return 3
+    else:
+        response_dict = response
+
+    if not isinstance(response_dict, dict):
+        logger.error("Processed agent response is not a dictionary."); return 4
+
     try:
-        with open(filename, 'w', encoding='utf-8') as f: json.dump(response_dict, f, indent=4)
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(response_dict, f, indent=4)
         return 0
-    except PermissionError as e: logger.error(f"Permission error writing to {filename}: {e}"); return 1
+    except (IOError, PermissionError) as e:
+        logger.error(f"File system error writing to {filename}: {e}"); return 1
+
 
 def get_instructions(subject: str) -> List[str]:
     INSTRUCTIONS = [
