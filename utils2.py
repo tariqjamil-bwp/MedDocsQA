@@ -6,135 +6,117 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Union
 
-# Attempt to import pypandoc. If it's not installed, document conversion will fail gracefully.
+# --- Dependency Imports ---
 try:
     import pypandoc
 except ImportError:
     pypandoc = None
 
-# Get a logger for this module. The root logger is configured in main.py.
+# NEW: Import Jinja2
+try:
+    import jinja2
+except ImportError:
+    jinja2 = None
+
+# --- Module-level Configuration ---
 logger = logging.getLogger(__name__)
 
 # #############################################################################
-# --- 1. Markdown and DOCX Conversion ---
+# --- 1. Markdown and DOCX Conversion (with Dynamic Jinja2 Templates) ---
 # #############################################################################
 
-# This template defines the structure for each question in the final output files.
-OUTPUT_TEMPLATE = """
-## Question #: {{question_num}}
+# Import the Jinja2-compatible templates
+from templates import (
+    OUTPUT_TEMPLATE_FULL_JINJA,
+    OUTPUT_TEMPLATE_ORIGINAL_JINJA,
+    OUTPUT_TEMPLATE_UPDATED_JINJA
+)
 
-**CLINICAL SCENARIO:**
-{{question_desc}}
+# Create a registry to map user-friendly names to the template strings
+TEMPLATE_REGISTRY = {
+    "FULL": OUTPUT_TEMPLATE_FULL_JINJA,
+    "ORIGINAL": OUTPUT_TEMPLATE_ORIGINAL_JINJA,
+    "UPDATED": OUTPUT_TEMPLATE_UPDATED_JINJA,
+}
 
-**QUESTION LINE:**
-{{question_line}}
+# --- NEW: Define the custom filter function to split options ---
+def split_and_trim(text: str) -> List[str]:
+    """A custom Jinja filter to split a string by newlines and trim whitespace."""
+    if not isinstance(text, str):
+        return []
+    # Split by newline, filter out any empty lines
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
-**OPTIONS:**
-{{options}}
-
-**CORRECT CHOICE:**
-{{correct_choice}}
-
-**REASONING:**
-{{reasoning}}
-
----
-
-**> DESCRIPTION:**
-{{updated_description}}
-
-**> OPTIONS:**
-{{updated_options}}
-
-**> CORRECT CHOICE:**
-{{updated_correct_choice}}   ({{updated_correct_choice_text}}}
-
-**> REFINED REASONING:**
-{{updated_reasoning}}
-
-
-"""
-
-# #############################################################################
-
-def render_question_md(question: dict) -> str:
-    """
-    Renders a single question dictionary into a Markdown string using the template.
-    It safely handles missing keys by defaulting to an empty string.
-    """
-    # Create a copy to avoid modifying the original dictionary
-    q = question.copy()
+# Pre-compile the templates and register the custom filter
+COMPILED_TEMPLATES = {}
+if jinja2:
+    jinja_env = jinja2.Environment(loader=jinja2.BaseLoader(), autoescape=True)
+    # Register our custom function as a filter named 'splitlines'
+    jinja_env.filters['splitlines'] = split_and_trim
     
-    # Ensure all expected keys are present, defaulting to a placeholder if not
-    keys = [
-        "question_num", "question_desc", "question_line", "options",
-        "correct_choice", "reasoning", "updated_description",
-        "updated_options", "updated_correct_choice",
-        "updated_correct_choice_text", "updated_reasoning"
-    ]
-    for key in keys:
-        q.setdefault(key, "[N/A]")
+    for name, template_string in TEMPLATE_REGISTRY.items():
+        COMPILED_TEMPLATES[name] = jinja_env.from_string(template_string)
 
-    # Replace placeholders in the template
-    # Using a loop makes it more maintainable than a long chain of .replace()
-    md_string = OUTPUT_TEMPLATE
-    for key, value in q.items():
-        if "option" in key:
-            md_string = md_string.replace(f"{{{{{key}}}}}", str(value.replace('\n', '\n\n')))
-        else:
-            md_string = md_string.replace(f"{{{{{key}}}}}", str(value))
+
+# --- REPLACED: This is the new, correct rendering function ---
+def render_question_md(question: dict, template_choice: str) -> str:
+    """
+    Renders a single question dictionary using a dynamically selected Jinja2 template.
+    """
+    if not jinja2:
+        logger.error("Jinja2 is not installed. Please run 'pip install Jinja2'.")
+        return ""
+
+    template = COMPILED_TEMPLATES.get(template_choice.upper())
+
+    if not template:
+        logger.error(f"Template '{template_choice}' not found. Defaulting to 'FULL'.")
+        template = COMPILED_TEMPLATES["FULL"]
         
-    return md_string
+    # The render method uses the Jinja2 engine, not simple string replacement.
+    return template.render(question)
 
-# #############################################################################
+def convert_json_to_docx(
+    json_path: Union[str, Path],
+    docx_path: Union[str, Path],
+    template_choice: str = "FULL"
+):
+    _convert_json_to_docx(json_path=json_path, docx_path=docx_path, template_choice="FULL")
+    _convert_json_to_docx(json_path=json_path, docx_path=docx_path, template_choice="ORIGINAL")
+    _convert_json_to_docx(json_path=json_path, docx_path=docx_path, template_choice="UPDATED")
 
-def convert_json_to_docx(json_path: Union[str, Path], docx_path: Union[str, Path]):
+def _convert_json_to_docx(
+    json_path: Union[str, Path],
+    docx_path: Union[str, Path],
+    template_choice: str = "FULL"
+):
     """
-    Converts a JSON file (containing a list of question objects) into a DOCX file
-    by first creating an intermediate Markdown file in the 'tmp' directory.
-
-    Args:
-        json_path (Union[str, Path]): Path to the source JSON file.
-        docx_path (Union[str, Path]): Path where the final DOCX file will be saved.
+    Converts a JSON file into a DOCX file using a specified Jinja2 template.
     """
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 1a. Pre-flight Checks ---
-    # Check if pypandoc is available.
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     if pypandoc is None:
         logger.error("`pypandoc` is not installed. Cannot convert to DOCX. Please run 'pip install pypandoc'.")
         return
-        
-    json_path = Path(json_path)
-    docx_path = Path(docx_path)
-
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 1b. Read and Validate Source JSON ---
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
+    json_path, docx_path = Path(json_path), Path(docx_path)
     try:
         with open(json_path, 'r', encoding='utf-8') as f:
             questions = json.load(f)
         if not isinstance(questions, list):
-            logger.error(f"Input file '{json_path.name}' must contain a list of question objects.")
+            logger.error(f"Input file '{json_path.name}' must be a list of objects.")
             return
     except (json.JSONDecodeError, FileNotFoundError) as e:
         logger.error(f"Error reading source file '{json_path.name}': {e}")
         return
 
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 1c. Create Intermediate Markdown File ---
-    # This file is created in the 'tmp' directory.
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # Using Path.name is robust and works on all operating systems.
     tmp_dir = Path("tmp")
     tmp_dir.mkdir(exist_ok=True)
-    md_path = tmp_dir / f"{json_path.stem}.md"
+    md_path = tmp_dir / f"{json_path.stem}_{template_choice.lower()}.md"
 
     try:
         with open(md_path, 'w', encoding='utf-8') as f:
             for q in questions:
                 if isinstance(q, dict):
-                    f.write(render_question_md(q))
+                    # This now calls the correct Jinja2 rendering function
+                    f.write(render_question_md(q, template_choice=template_choice))
                 else:
                     logger.warning(f"Skipping non-dictionary item in '{json_path.name}': {q}")
         logger.info(f"Intermediate Markdown file saved to: {md_path}")
@@ -142,20 +124,15 @@ def convert_json_to_docx(json_path: Union[str, Path], docx_path: Union[str, Path
         logger.error(f"Error writing to temporary file '{md_path}': {e}")
         return
 
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
-    # --- 1d. Convert Markdown to DOCX ---
-    # <><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><>
     try:
         docx_path.parent.mkdir(parents=True, exist_ok=True)
-        pypandoc.convert_file(md_path, 'docx', outputfile=str(docx_path))
-        logger.info(f"Successfully converted to DOCX: '{docx_path.name}'")
+        docx_pathT = Path(str(docx_path).replace('.docx', f"{template_choice[0]}.docx"))
+        pypandoc.convert_file(str(md_path), 'docx', outputfile=str(docx_pathT))
+        logger.info(f"Successfully converted '{md_path.name}' to DOCX: '{docx_pathT.name}'")
     except Exception as e:
         logger.error(f"Error converting to .docx using pypandoc: {e}")
         logger.error("Please ensure Pandoc is installed and accessible in your system's PATH.")
-        
-# #############################################################################
-# --- 2. JSON Sorting Utility ---
-# #############################################################################
+
 
 # #############################################################################
 # --- 2. JSON Sorting Utility (Corrected Version) ---
